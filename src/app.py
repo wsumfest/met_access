@@ -4,6 +4,7 @@ import logging
 import threading
 import pickle
 import math
+import json
 from config import CONFIG
 from exception.exceptions import NoDataFoundException, GeneralException
 
@@ -77,7 +78,7 @@ def _increment_version(fp):
 		except Exception as e:
 			pass
 	fp.seek(0)
-	app_cache.set("curr_ml_model", curr_version)
+	app_cache.set("curr_ml_version", curr_version)
 	fp.write(str(curr_version).encode("utf-8"))
 	fp.truncate()
 
@@ -90,13 +91,13 @@ def _verify_ml_model():
 	with open(MODEL_VERSION_FILE_LOCATION, "r") as version_file:
 		version_file.seek(0)
 		_bytes = version_file.read()
-		_bytes = _bytes.decode("utf-8")
 		if _bytes == "-":
 			return False
 		else:
 			stored_version = int(_bytes)
 	curr_version = app_cache.get("curr_ml_version")
 	curr_model = app_cache.get("curr_ml_model")
+	print("Stored Version: {0}\nCurrent Version: {1}\nModel: {2}".format(stored_version, curr_version, curr_model))
 	if curr_version is None or curr_model is None:
 		return False
 	if curr_version != stored_version:
@@ -185,7 +186,9 @@ def train_ml_model():
 @app.route("/art/prediction", methods=["POST", "GET"])
 def predict():
 	# params = request.get_json(silent=True)
-	_verify_ml_model()
+	valid = _verify_ml_model()
+	return json.dumps({"Valid": valid})
+
 
 
 """
