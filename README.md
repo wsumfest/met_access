@@ -9,3 +9,4 @@ Notes
 * I am also factorizing our  data, which will not be pleasant to present to an end user. For this, I am serializing the factor map and storing it on the machine. During runtime, every time the model is initialized, this will be deserialized and pulled into the cache. 
 * For simplicity, I am leveraging pandas for my get requests. If I had a persistant data store, I would simply use that. Here, it is sufficient to store the dataframe in memory.
 * Run the flask app `cd src && python3 app.py 'file location to store data' 'file location to store model bytes' 'file location to store reference table'`.
+* To run unit tests `cd src && python3 -m pytest test/ --disable-pytest-warnings`.
