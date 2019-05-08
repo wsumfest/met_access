@@ -37,26 +37,37 @@ def _get_csv_dataframe():
 Stores the given medium factorization map on the machine for prediction engine.
 """
 def _store_backward_ref_table(df):
-	values, indices = pandas.factorize(df["Medium"])
+	ref_table = dict()
+	for column in df.columns:
+		ref_table[column] = dict()
+		values, indices = pandas.factorize(df[column])
+		for count, val in enumerate(indices):
+			ref_table[column][val] = count
+
 	with open(SWAP_FILE_LOCATION, "wb+") as store_file:
 		store_file.seek(0)
-		pickle.dump(indices, store_file)
+		pickle.dump(ref_table, store_file)
 		store_file.truncate()
-	app_cache.delete("model_indices")
+	app_cache.delete("ref_table")
 	return
 
 """
 Gets the ref table.
 """
 def _get_backward_ref_table():
-	curr_model_indices = app_cache.get("model_indices")
-	if curr_model_indices:
-		return curr_model_indices
+	ref_table = app_cache.get("ref_table")
+	if ref_table:
+		return ref_table
 	with open(SWAP_FILE_LOCATION, "rb") as store_file:
 		store_file.seek(0)
-		curr_model_indices = pickle.load(store_file)
-	return curr_model_indices 
+		ref_table = pickle.load(store_file)
+		
+	app_cache.set("ref_table", ref_table)
+	return ref_table 
 
+"""
+Serializes and stores the model on the computer. Increments model version.
+"""
 def _persist_ml_model(model):
 	with open(MODEL_FILE_LOCATION, "wb+") as ml_file:
 		ml_file.seek(0)
@@ -65,6 +76,22 @@ def _persist_ml_model(model):
 	with open(MODEL_VERSION_FILE_LOCATION, "wb+") as ml_version_file:
 		_increment_version(ml_version_file)
 	return
+
+"""
+Gets our current ML Model.
+"""
+def _get_ml_model():
+	_curr_model = app_cache.get("curr_ml_model")
+	if _curr_model:
+		return _curr_model
+
+	with open(MODEL_FILE_LOCATION, "rb+") as ml_file:
+		ml_file.seek(0)
+		_curr_model = pickle.load(ml_file)
+	app_cache.set("curr_ml_model", _curr_model)
+	return _curr_model
+
+
 
 
 def _increment_version(fp):
@@ -97,7 +124,6 @@ def _verify_ml_model():
 			stored_version = int(_bytes)
 	curr_version = app_cache.get("curr_ml_version")
 	curr_model = app_cache.get("curr_ml_model")
-	print("Stored Version: {0}\nCurrent Version: {1}\nModel: {2}".format(stored_version, curr_version, curr_model))
 	if curr_version is None or curr_model is None:
 		return False
 	if curr_version != stored_version:
@@ -108,14 +134,19 @@ def _verify_ml_model():
 """
 Verify that the necessary params are given for prediction engine.
 """
-def _verify_params(**kwargs):
+def _verify_params(params):
 	valid = False
+	if params is None:
+		return valid
 	try:
-		_dataframe = pandas.Dataframe.from_dict(kwargs)
-		return True
+		_ref_table = _get_backward_ref_table()
+		for key in params.keys():
+			if key not in _ref_table:
+				return False
+		valid = True
 	except Exception as e:
 		print(e)
-		return False
+		valid = False
 	return valid
 
 
@@ -144,6 +175,7 @@ def initialize_files():
 		print(exc)
 
 	return False
+
 
 
 """
@@ -181,13 +213,47 @@ def train_ml_model():
 	return _success
 
 
+def _transform_raw_prediction(prediction, table):
+	value = prediction[0]
+	for k, v in table.items():
+		if value == v:
+			return k
+	return "Unspecified Value"
 
 
-@app.route("/art/prediction", methods=["POST", "GET"])
+"""
+Given a set of parameters, returns a prediction from our model.
+"""
+@app.route("/art/prediction", methods=["POST"])
 def predict():
-	# params = request.get_json(silent=True)
-	valid = _verify_ml_model()
-	return json.dumps({"Valid": valid})
+	params = request.get_json(silent=True)
+	_valid_params = _verify_params(params)
+	if _valid_params:
+		valid = _verify_ml_model()
+		_ref_table = _get_backward_ref_table()
+		if valid:
+			_predict_dataframe = pandas.DataFrame()
+			for column in params.keys():
+				if params[column] in _ref_table[column]:
+					_predict_dataframe[column] = pandas.Series([ _ref_table[column][params[column]] ])
+				else:
+					_predict_dataframe[column] = pandas.Series([-1])
+			_keys = set(params.keys())
+			_keys.add("Medium") #Add Medium as that is dropped.
+			missing_column_set = set(_ref_table.keys()) - _keys
+			for col in list(missing_column_set):
+				_predict_dataframe[col] = pandas.Series([-1])
+			if _predict_dataframe.empty:
+				return json.dumps({"error": "Parameters did not contain valid data. Please check values and try again."})
+			_model = _get_ml_model()
+			_raw_prediction = _model.predict(_predict_dataframe)
+			_transformed_prediction = _transform_raw_prediction(_raw_prediction, _ref_table["Medium"])
+			return json.dumps({"Prediction": "{0}".format(_transformed_prediction)})
+		else:
+			return json.dumps({"error": "Machine Learning Model Not Loaded. Please wait and Try Again."})
+	else:
+		return json.dumps({"error": "Invalid Parameters."})
+	return 
 
 
 
@@ -202,12 +268,62 @@ def get_single_id(id):
 		row = df.loc[index]
 		return row.to_json()
 	except KeyError as ke:
-		return NoDataFoundException(id)
+		return json.dumps({"error": "No data found for ID: {0}".format(id)})
 	except Exception as e:
-		return GeneralException(e)
+		return json.dumps({"error": "A General Exception occurred...Stack Trace: {0}".format(str(e))})
+
+"""
+Checks that the given params are valid for a get request.
+"""
+def _verify_get_params(params):
+	_valid_keys = {"page_number", "page_size"}
+	_valid = True
+	for item in params.keys():
+		if item not in _valid_keys:
+			_valid = False
+		if not params[item].isdigit():
+			_valid = False
+	return _valid
+
+"""
+Returns the bottom and top index of a valid request.
+"""
+def _get_dataframe_indices(args, max_index):
+	_page_number, _page_size = 0, CONFIG["DEFAULT_PAGE_SIZE"]
+	_bottom_index = 0
+	_top_index = _bottom_index + _page_size
+	if "page_size" in args:
+		_page_size = min(int(args["page_size"]), CONFIG["MAXIMUM_PAGE_SIZE"])
+	if "page_number" in args:
+		_page_number = int(args["page_number"])
+	if (_page_number+1)*_page_size >= max_index:
+		_top_index = max_index
+		_bottom_index = _top_index - _page_size
+	else:
+		_bottom_index = _page_size*_page_number
+		_top_index = _bottom_index + _page_size
+	return _bottom_index, _top_index
 
 
-
+"""
+Gets a page of data. If no page value is given, defaults to one. If no page_size is given, defaults to default.
+Info is given as URL k/v pairs.
+"""
+@app.route("/art")
+def get_art():
+	df = _get_csv_dataframe()
+	args = request.args
+	n = df.index.size
+	_valid = _verify_get_params(args)
+	if _valid:
+		_bottom_index, _top_index = _get_dataframe_indices(args, n)
+		try:
+			_dataframe = df.loc[_bottom_index: _top_index]
+			return _dataframe.to_json()
+		except Exception as e:
+			return json.dumps({"error": "A General Exception occurred...Stack Trace: {0}".format(str(e))})	
+	else:
+		return json.dumps({"error": "A General Exception occurred...Stack Trace: {0}".format(str(e))})
 
 
 if __name__ == '__main__':
